@@ -115,7 +115,6 @@ library
         freer-extras -any,
         plutus-ledger -any,
         plutus-tx -any,
-        plutus-tx-plugin -any,
         plutus-contract -any,
         playground-common -any
     build-depends:
