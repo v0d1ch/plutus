@@ -183,7 +183,6 @@ library
         uuid -any,
         vector -any,
         warp -any,
-        Win32-network -any,
         websockets -any,
         yaml -any,
         mwc-random -any,
@@ -195,6 +194,8 @@ library
         data-default -any,
         time-units -any,
         time -any
+    if os(windows)
+        Win32-network -any
 
 executable plutus-pab
     main-is: Main.hs
