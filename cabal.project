@@ -16,7 +16,7 @@ packages: doc
           plutus-errors
           plutus-ledger
           plutus-ledger-api
-          plutus-metatheory
+          -- plutus-metatheory
           plutus-pab
           plutus-playground-server
           plutus-tx
