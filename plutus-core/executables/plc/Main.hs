@@ -11,6 +11,7 @@ import           PlutusPrelude                            (through)
 
 import qualified PlutusCore                               as PLC
 import qualified PlutusCore.CBOR                          as PLC
+import           PlutusCore.Check.Uniques                 (checkProgram)
 import qualified PlutusCore.Evaluation.Machine.Ck         as Ck
 import           PlutusCore.Evaluation.Machine.ExBudget   (ExBudget (..), ExRestrictingBudget (..))
 import           PlutusCore.Evaluation.Machine.ExMemory   (ExCPU (..), ExMemory (..))
@@ -24,9 +25,9 @@ import qualified PlutusCore.StdLib.Data.ChurchNat         as StdLib
 import qualified PlutusCore.StdLib.Data.Integer           as StdLib
 import qualified PlutusCore.StdLib.Data.Unit              as StdLib
 
-import           PlutusCore.Check.Uniques                 (checkProgram)
 import qualified UntypedPlutusCore                        as UPLC
 import qualified UntypedPlutusCore.Evaluation.Machine.Cek as Cek
+import qualified Uplc.Main                                as UPLC (Program)
 
 import           Codec.Serialise                          (DeserialiseFailure (DeserialiseFailure))
 import           Control.DeepSeq                          (NFData, rnf)
@@ -379,7 +380,7 @@ getPlcInput (FileInput file) = readFile file
 getPlcInput StdInput         = getContents
 
 -- | Read and parse a source program
-parseInput :: -- (AsParseError e AlexPosn, MonadError e m, MonadQuote m) =>
+parseInput :: PLC.Rename a =>
   -- | The parseProgram function for either UPLC or PLC
   (BSL.ByteString -> PLC.QuoteT (Either (PLC.ParseError PLC.AlexPosn)) a) ->
   -- | The checkProgram function for either UPLC or PLC
@@ -485,8 +486,17 @@ getPrintMethod = \case
       Readable      -> PP.prettyPlcReadableDef
       ReadableDebug -> PP.prettyPlcReadableDebug
 
+-- | Print out a PLC program in IO.
 writePlc :: Output -> PrintMode -> Program a -> IO ()
 writePlc outp mode prog = do
+  let printMethod = getPrintMethod mode
+  case outp of
+        FileOutput file -> writeFile file . Prelude.show . printMethod $ prog
+        StdOutput       -> print . printMethod $ prog
+
+-- | Print out a UPLC program to IO.
+writeUplc :: Output -> PrintMode -> UPLC.Program a -> IO ()
+writeUplc outp mode prog = do
   let printMethod = getPrintMethod mode
   case outp of
         FileOutput file -> writeFile file . Prelude.show . printMethod $ prog
@@ -523,7 +533,7 @@ runPrint parseFn (PrintOptions inp mode) =
 
 runPlcPrint :: PrintOptions -> IO ()
 runPlcPrint = runPrint parsePlcInput
-{-
+
 ---------------- Erasure ----------------
 
 -- | Input a program, erase the types, then output it
@@ -532,11 +542,10 @@ runErase (EraseOptions inp ifmt outp ofmt mode) = do
   typedProg <- getProgram ifmt inp
   let untypedProg = () <$ UPLC.eraseProgram typedProg
   case ofmt of
-    Plc           -> writeUplc outp mode untypedProg
+    Plc    -> writeUplc outp mode untypedProg
     Cbor _ -> writeCBOR outp untypedProg
     Flat _ -> writeFlat outp untypedProg
 
- -}
 
 ---------------- Script application ----------------
 
@@ -762,7 +771,7 @@ instance PrintBudgetState Cek.RestrictingSt where
 ---------------- Evaluation ----------------
 
 runEval :: EvalOptions -> IO ()
-runEval (EvalOptions inp ifmt evalMode printMode budgetMode timingMode cekModel) =
+runEval (EvalOptions inp ifmt evalMode printMode budgetMode timingMode _) =
   case evalMode of
       CEK -> errorWithoutStackTrace "There is no CEK machine for Typed Plutus Core"
       CK  -> do
@@ -799,6 +808,6 @@ main = do
         Typecheck opts -> runTypecheck    opts
         Eval      opts -> runEval         opts
         Example   opts -> runPrintExample opts
-        -- Erase     opts -> runErase        opts
+        Erase     opts -> runErase        opts
         Print     opts -> runPlcPrint        opts
         Convert   opts -> runConvert      opts

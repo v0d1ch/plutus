@@ -2,10 +2,11 @@
 {-# LANGUAGE LambdaCase       #-}
 {-# LANGUAGE TypeApplications #-}
 
-module MainProgram (main) where
+module UPLC.Main (main, Program) where
 
 import           PlutusPrelude                            (through)
 
+import           Common
 import qualified PlutusCore                               as PLC
 import qualified PlutusCore.CBOR                          as PLC
 import qualified PlutusCore.Evaluation.Machine.Ck         as Ck
@@ -50,6 +51,8 @@ import           System.Exit                              (exitFailure, exitSucc
 import           System.Mem                               (performGC)
 import           Text.Printf                              (printf)
 import           Text.Read                                (readMaybe)
+
+type Program a = UPLC.Program PLC.Name PLC.DefaultUni PLC.DefaultFun a
 
 -- UPLC supports name or de Bruijn indices when (de)serialising ASTs
 data AstNameType =
