@@ -28,7 +28,7 @@ import           PlutusCore.Check.Uniques                 (checkProgram)
 import qualified UntypedPlutusCore                        as UPLC
 import qualified UntypedPlutusCore.Evaluation.Machine.Cek as Cek
 
-import           Codec.Serialise
+import           Codec.Serialise                          (DeserialiseFailure (DeserialiseFailure))
 import           Control.DeepSeq                          (NFData, rnf)
 import           Control.Monad                            (void)
 import           Control.Monad.Trans.Except               (runExceptT)
@@ -83,14 +83,16 @@ data EvalMode    = CK | CEK deriving (Show, Read)
 data BudgetMode  = Silent
                  | forall cost. (Eq cost, NFData cost, PrintBudgetState cost) =>
                      Verbose (Cek.ExBudgetMode cost PLC.DefaultUni PLC.DefaultFun)
-data AstNameType = Named -- PLC doesn't support de Bruijn indices when (de)serialising ASTs
+-- PLC doesn't support de Bruijn indices when (de)serialising ASTs
+data AstNameType = Named deriving (Show)
 type Files       = [FilePath]
 
-data Format = Plc | Cbor AstNameType | Flat AstNameType -- Input/output format for programs
-instance Show Format where
-    show Plc          = "plc"
-    show (Cbor Named) = "cbor-named"
-    show (Flat Named) = "flat-named"
+-- | Input/output format for programs
+data Format =
+  Plc
+  | Cbor AstNameType
+  | Flat AstNameType
+  deriving (Show)
 
 data TypecheckOptions = TypecheckOptions Input Format
 data ConvertOptions   = ConvertOptions Input Format Output Format PrintMode
@@ -418,26 +420,22 @@ getBinaryInput StdInput         = BSL.getContents
 getBinaryInput (FileInput file) = BSL.readFile file
 
 -- Read and deserialise a CBOR-encoded AST
--- There's no (un-)deBruijnifier for typed PLC, so we don't handle that case.
-loadASTfromCBOR :: AstNameType -> Input -> IO (Program ())
-loadASTfromCBOR cborMode inp =
-    case cborMode of
-         Named    -> getBinaryInput inp >>= handleResult PLC.deserialiseRestoringUnitsOrFail
-    where handleResult wrapper =
-              \case
-               Left (DeserialiseFailure offset msg) ->
-                   errorWithoutStackTrace $ "CBOR deserialisation failure at offset " ++ Prelude.show offset ++ ": " ++ msg
-               Right r -> return $ wrapper r
+loadASTfromCBOR :: Input -> IO (Program ())
+loadASTfromCBOR inp = do
+    bin <- getBinaryInput inp
+    case PLC.deserialiseRestoringUnitsOrFail bin of
+      Left (DeserialiseFailure offset msg) ->
+        errorWithoutStackTrace $ "CBOR deserialisation failure at offset " ++ Prelude.show offset ++ ": " ++ msg
+      Right r -> return r
 
 -- Read and deserialise a Flat-encoded AST
-loadASTfromFlat :: AstNameType -> Input -> IO (Program ())
-loadASTfromFlat flatMode inp =
-    case flatMode of
-         Named    -> getBinaryInput inp >>= handleResult TypedProgram . unflat
-    where handleResult wrapper =
-              \case
-               Left e  -> errorWithoutStackTrace $ "Flat deserialisation failure: " ++ show e
-               Right r -> return $ wrapper r
+loadASTfromFlat :: Input -> IO (Program ())
+loadASTfromFlat inp = do
+    bin <- getBinaryInput inp
+    --  >>= handleResult TypedProgram . unflat
+    case unflat bin of
+      Left e  -> errorWithoutStackTrace $ "Flat deserialisation failure: " ++ show e
+      Right r -> return r
 
 
 -- Read either a PLC file or a CBOR file, depending on 'fmt'
@@ -445,11 +443,11 @@ getProgram ::  Format -> Input  -> IO (Program PLC.AlexPosn)
 getProgram fmt inp =
     case fmt of
       Plc  -> parsePlcInput inp
-      Cbor cborMode -> do
-               prog <- loadASTfromCBOR cborMode inp
+      Cbor _ -> do
+               prog <- loadASTfromCBOR inp
                return $ PLC.AlexPn 0 0 0 <$ prog  -- No source locations in CBOR, so we have to make them up.
-      Flat flatMode -> do
-               prog <- loadASTfromFlat flatMode inp
+      Flat _ -> do
+               prog <- loadASTfromFlat inp
                return $ PLC.AlexPn 0 0 0 <$ prog  -- No source locations in CBOR, so we have to make them up.
 
 
@@ -458,10 +456,9 @@ getProgram fmt inp =
 serialiseProgramCBOR :: Program () -> BSL.ByteString
 serialiseProgramCBOR = PLC.serialiseOmittingUnits
 
-writeCBOR :: Output -> AstNameType -> Program a -> IO ()
-writeCBOR outp cborMode prog = do
-  cbor <- case cborMode of
-            Named    -> pure $ serialiseProgramCBOR (() <$ prog) -- Change annotations to (): see Note [Annotation types].
+writeCBOR :: Output -> Program a -> IO ()
+writeCBOR outp prog = do
+  let cbor = serialiseProgramCBOR (() <$ prog) -- Change annotations to (): see Note [Annotation types].
   case outp of
     FileOutput file -> BSL.writeFile file cbor
     StdOutput       -> BSL.putStr cbor
@@ -469,12 +466,11 @@ writeCBOR outp cborMode prog = do
 ---------------- Serialise a program using Flat ----------------
 
 serialiseProgramFlat :: Flat a => Program a -> BSL.ByteString
-serialiseProgramFlat = BSL.fromStrict $ flat
+serialiseProgramFlat p = BSL.fromStrict $ flat p
 
-writeFlat :: Output -> AstNameType -> Program a -> IO ()
-writeFlat outp flatMode prog = do
-  flatProg <- case flatMode of
-            Named    -> pure $ serialiseProgramFlat (() <$ prog) -- Change annotations to (): see Note [Annotation types].
+writeFlat :: Output -> Program a -> IO ()
+writeFlat outp prog = do
+  let flatProg = serialiseProgramFlat (() <$ prog) -- Change annotations to (): see Note [Annotation types].
   case outp of
     FileOutput file -> BSL.writeFile file flatProg
     StdOutput       -> BSL.putStr flatProg
@@ -497,9 +493,9 @@ writePlc outp mode prog = do
         StdOutput       -> print . printMethod $ prog
 
 writeProgram :: Output -> Format -> PrintMode -> Program a -> IO ()
-writeProgram outp Plc mode prog          = writePlc outp mode prog
-writeProgram outp (Cbor cborMode) _ prog = writeCBOR outp cborMode prog
-writeProgram outp (Flat flatMode) _ prog = writeFlat outp flatMode prog
+writeProgram outp Plc mode prog   = writePlc outp mode prog
+writeProgram outp (Cbor _) _ prog = writeCBOR outp prog
+writeProgram outp (Flat _) _ prog = writeFlat outp prog
 
 
 ---------------- Conversions ----------------
@@ -516,11 +512,18 @@ runConvert (ConvertOptions inp ifmt outp ofmt mode) = do
 
 ---------------- Parse and print a PLC source file ----------------
 
-runPrint :: PrintOptions -> IO ()
-runPrint (PrintOptions inp mode) =
-    parseInput inp >>= print . getPrintMethod mode
+runPrint ::
+  (Input
+  -> IO
+     (PLC.Program
+        PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun PLC.AlexPosn)) ->
+  PrintOptions -> IO ()
+runPrint parseFn (PrintOptions inp mode) =
+    parseFn inp >>= print . getPrintMethod mode
 
-
+runPlcPrint :: PrintOptions -> IO ()
+runPlcPrint = runPrint parsePlcInput
+{-
 ---------------- Erasure ----------------
 
 -- | Input a program, erase the types, then output it
@@ -529,11 +532,11 @@ runErase (EraseOptions inp ifmt outp ofmt mode) = do
   typedProg <- getProgram ifmt inp
   let untypedProg = () <$ UPLC.eraseProgram typedProg
   case ofmt of
-    Plc           -> writePlc outp mode untypedProg
-    Cbor cborMode -> writeCBOR outp cborMode untypedProg
-    Flat flatMode -> writeFlat outp flatMode untypedProg
+    Plc           -> writeUplc outp mode untypedProg
+    Cbor _ -> writeCBOR outp untypedProg
+    Flat _ -> writeFlat outp untypedProg
 
-
+ -}
 
 ---------------- Script application ----------------
 
@@ -542,7 +545,7 @@ runApply :: ApplyOptions -> IO ()
 runApply (ApplyOptions inputfiles ifmt outp ofmt mode) = do
   scripts <- mapM (getProgram ifmt . FileInput) inputfiles
   let appliedScript =
-        case map (\case p -> () <$ p;  _ -> error "unexpected program type mismatch") scripts of
+        case map (\case p -> () <$ p) scripts of
           []          -> errorWithoutStackTrace "No input files"
           progAndargs -> foldl1 PLC.applyProgram progAndargs
   writeProgram outp ofmt mode appliedScript
@@ -796,6 +799,6 @@ main = do
         Typecheck opts -> runTypecheck    opts
         Eval      opts -> runEval         opts
         Example   opts -> runPrintExample opts
-        Erase     opts -> runErase        opts
-        Print     opts -> runPrint        opts
+        -- Erase     opts -> runErase        opts
+        Print     opts -> runPlcPrint        opts
         Convert   opts -> runConvert      opts

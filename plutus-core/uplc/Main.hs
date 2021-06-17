@@ -51,6 +51,12 @@ import           System.Mem                               (performGC)
 import           Text.Printf                              (printf)
 import           Text.Read                                (readMaybe)
 
+-- UPLC supports name or de Bruijn indices when (de)serialising ASTs
+data AstNameType =
+  Named
+  | DeBruijn
+  deriving (Show)
+
 -- | Untyped AST with names consisting solely of De Bruijn indices. This is
 -- currently only used for intermediate values during CBOR/Flat
 -- serialisation/deserialisation.  We may wish to add TypedProgramDeBruijn as
@@ -86,7 +92,7 @@ fromDeBruijn prog = do
       Left e  -> errorWithoutStackTrace $ show e
       Right p -> return p
 
-parseUplcInput = parseInput UPLC.parseProgram
+parseUplcInput = parseInput UPLC.parseProgram checkProgram
 
 loadASTfromCBOR :: AstNameType -> Input -> IO (Program ())
 loadASTfromCBOR cborMode inp =
@@ -184,3 +190,18 @@ runEval (EvalOptions inp ifmt evalMode printMode budgetMode timingMode cekModel)
                                 printBudgetState term cekModel budget
                                 handleResultSilently result  -- We just want to see the budget information
                         Timing n -> timeEval n evaluate term >>= handleTimingResultsWithBudget term
+
+runUplcPrint :: PrintOptions -> IO ()
+runUplcPrint = runPrint parseUplcInput
+
+main :: IO ()
+main = do
+    options <- customExecParser (prefs showHelpOnEmpty) plcInfoCommand
+    case options of
+        Apply     opts -> runApply        opts
+        Typecheck opts -> runTypecheck    opts
+        Eval      opts -> runEval         opts
+        Example   opts -> runPrintExample opts
+        Erase     opts -> runErase        opts
+        Print     opts -> runUplcPrint        opts
+        Convert   opts -> runConvert      opts
