@@ -65,18 +65,10 @@ import           Text.Read                                (readMaybe)
    the simplest thing to do and fits our use case.
  -}
 
--- | Our internal representation of programs is as ASTs over the Name type.
-type TypedProgram a = PLC.Program PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun a
-type UntypedProgram a = UPLC.Program PLC.Name PLC.DefaultUni PLC.DefaultFun a
+type Program a = PLC.Program PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun a
 
-data Program a =
-      TypedProgram (TypedProgram a)
-    | UntypedProgram (UntypedProgram a)
-    deriving (Functor)
-
-instance (PP.PrettyBy PP.PrettyConfigPlc (Program a)) where
-    prettyBy cfg (TypedProgram p)   = PP.prettyBy cfg p
-    prettyBy cfg (UntypedProgram p) = PP.prettyBy cfg p
+-- instance (PP.PrettyBy PP.PrettyConfigPlc (Program a)) where
+    -- prettyBy cfg p   = PP.prettyBy cfg p
 
 ---------------- Types for commands and arguments ----------------
 
@@ -430,7 +422,7 @@ getBinaryInput (FileInput file) = BSL.readFile file
 loadASTfromCBOR :: AstNameType -> Input -> IO (Program ())
 loadASTfromCBOR cborMode inp =
     case cborMode of
-         Named    -> getBinaryInput inp >>= handleResult TypedProgram . PLC.deserialiseRestoringUnitsOrFail
+         Named    -> getBinaryInput inp >>= handleResult PLC.deserialiseRestoringUnitsOrFail
     where handleResult wrapper =
               \case
                Left (DeserialiseFailure offset msg) ->
@@ -464,8 +456,7 @@ getProgram fmt inp =
 ---------------- Serialise a program using CBOR ----------------
 
 serialiseProgramCBOR :: Program () -> BSL.ByteString
-serialiseProgramCBOR (TypedProgram p)   = PLC.serialiseOmittingUnits p
-serialiseProgramCBOR (UntypedProgram p) = UPLC.serialiseOmittingUnits p
+serialiseProgramCBOR = PLC.serialiseOmittingUnits
 
 writeCBOR :: Output -> AstNameType -> Program a -> IO ()
 writeCBOR outp cborMode prog = do
@@ -478,9 +469,7 @@ writeCBOR outp cborMode prog = do
 ---------------- Serialise a program using Flat ----------------
 
 serialiseProgramFlat :: Flat a => Program a -> BSL.ByteString
-serialiseProgramFlat (TypedProgram p)   = BSL.fromStrict $ flat p
-serialiseProgramFlat (UntypedProgram p) = BSL.fromStrict $ flat p
-
+serialiseProgramFlat = BSL.fromStrict $ flat
 
 writeFlat :: Output -> AstNameType -> Program a -> IO ()
 writeFlat outp flatMode prog = do
@@ -534,14 +523,11 @@ runPrint (PrintOptions inp mode) =
 
 ---------------- Erasure ----------------
 
-eraseProgram :: TypedProgram a -> Program a
-eraseProgram = UntypedProgram . UPLC.eraseProgram
-
 -- | Input a program, erase the types, then output it
 runErase :: EraseOptions -> IO ()
 runErase (EraseOptions inp ifmt outp ofmt mode) = do
-  TypedProgram typedProg <- getProgram ifmt inp
-  let untypedProg = () <$ eraseProgram typedProg
+  typedProg <- getProgram ifmt inp
+  let untypedProg = () <$ UPLC.eraseProgram typedProg
   case ofmt of
     Plc           -> writePlc outp mode untypedProg
     Cbor cborMode -> writeCBOR outp cborMode untypedProg
@@ -556,9 +542,9 @@ runApply :: ApplyOptions -> IO ()
 runApply (ApplyOptions inputfiles ifmt outp ofmt mode) = do
   scripts <- mapM (getProgram ifmt . FileInput) inputfiles
   let appliedScript =
-        case map (\case TypedProgram p -> () <$ p;  _ -> error "unexpected program type mismatch") scripts of
+        case map (\case p -> () <$ p;  _ -> error "unexpected program type mismatch") scripts of
           []          -> errorWithoutStackTrace "No input files"
-          progAndargs -> TypedProgram $ foldl1 PLC.applyProgram progAndargs
+          progAndargs -> foldl1 PLC.applyProgram progAndargs
   writeProgram outp ofmt mode appliedScript
 
 ---------------- Examples ----------------
@@ -650,7 +636,7 @@ runPrintExample (ExampleOptions (ExampleSingle name)) = do
 
 runTypecheck :: TypecheckOptions -> IO ()
 runTypecheck (TypecheckOptions inp fmt) = do
-  TypedProgram prog <- getProgram fmt inp
+  prog <- getProgram fmt inp
   case PLC.runQuoteT $ do
     tcConfig <- PLC.getDefTypeCheckConfig ()
     PLC.typecheckPipeline tcConfig (void prog)
@@ -780,7 +766,7 @@ runEval (EvalOptions inp ifmt evalMode printMode budgetMode timingMode cekModel)
               let !_ = case budgetMode of
                           Silent    -> ()
                           Verbose _ -> errorWithoutStackTrace "There is no budgeting for typed Plutus Core"
-              TypedProgram prog <- getProgram ifmt inp
+              prog <- getProgram ifmt inp
               let evaluate = Ck.evaluateCkNoEmit PLC.defaultBuiltinsRuntime
                   term = void . PLC.toTerm $ prog
                   !_ = rnf term
