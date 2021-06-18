@@ -406,8 +406,8 @@ test-suite untyped-plutus-core-test
 
 executable plc
     import: lang
-    main-is: Main.hs
-    hs-source-dirs: executables/plc
+    main-is: plc/Main.hs
+    hs-source-dirs: executables
     build-depends:
         plutus-core -any,
         base <5,
@@ -424,8 +424,8 @@ executable plc
 
 executable uplc
     import: lang
-    main-is: Main.hs
-    hs-source-dirs: executables/uplc
+    main-is: uplc/Main.hs
+    hs-source-dirs: executables
     build-depends:
         plutus-core -any,
         base <5,
