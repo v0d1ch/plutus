@@ -132,6 +132,9 @@ library
         UntypedPlutusCore.Parser
         UntypedPlutusCore.Rename
         UntypedPlutusCore.Check.Uniques
+        UntypedPlutusCore.Core.Type
+        UntypedPlutusCore.Core.Instance.CBOR
+
 
         Common
         Crypto
@@ -216,7 +219,6 @@ library
         UntypedPlutusCore.Analysis.Definitions
         UntypedPlutusCore.Core
         UntypedPlutusCore.Core.Instance
-        UntypedPlutusCore.Core.Instance.CBOR
         UntypedPlutusCore.Core.Instance.Eq
         UntypedPlutusCore.Core.Instance.Flat
         UntypedPlutusCore.Core.Instance.Pretty
@@ -226,7 +228,6 @@ library
         UntypedPlutusCore.Core.Instance.Pretty.Readable
         UntypedPlutusCore.Core.Instance.Recursive
         UntypedPlutusCore.Core.Plated
-        UntypedPlutusCore.Core.Type
         UntypedPlutusCore.Evaluation.Machine.Cek.CekMachineCosts
         UntypedPlutusCore.Evaluation.Machine.Cek.ExBudgetMode
         UntypedPlutusCore.Evaluation.Machine.Cek.Internal
@@ -415,6 +416,7 @@ executable plc
         deepseq -any,
         flat -any,
         monoidal-containers -any,
+        mtl -any,
         optparse-applicative -any,
         prettyprinter -any,
         serialise -any,
@@ -433,6 +435,7 @@ executable uplc
         deepseq -any,
         flat -any,
         monoidal-containers -any,
+        mtl -any,
         optparse-applicative -any,
         prettyprinter -any,
         serialise -any,

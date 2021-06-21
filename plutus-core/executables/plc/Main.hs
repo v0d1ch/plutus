@@ -1,45 +1,13 @@
 module Main (main) where
 
+import           Common
+import qualified UntypedPlutusCore.Core.Type as UPLC
 
 plcHelpText :: String
 plcHelpText = helpText "Typed Plutus Core"
 
 plcInfoCommand :: ParserInfo Command
 plcInfoCommand = plutus "Typed Plutus Core Tool" plcHelpText
-
----------------- Reading programs from files ----------------
-
-parsePlcInput :: Input
-  -> IO
-     (PLC.Program
-        PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun PLC.AlexPosn)
-parsePlcInput = parseInput PLC.parseProgram checkProgram
-
--- | Print out a PLC program in IO.
-writePlc ::
-  Output ->
-    PrintMode
-    -> (PLC.Program PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun) a -> IO ()
-writePlc outp mode prog = do
-  let printMethod = getPrintMethod mode
-  case outp of
-        FileOutput file -> writeFile file . Prelude.show . printMethod $ prog
-        StdOutput       -> print . printMethod $ prog
-
--- | Print out a UPLC program to IO.
-writeUplc :: Output -> PrintMode -> UPLC.Program a -> IO ()
-writeUplc outp mode prog = do
-  let printMethod = getPrintMethod mode
-  case outp of
-        FileOutput file -> writeFile file . Prelude.show . printMethod $ prog
-        StdOutput       -> print . printMethod $ prog
-
-writeProgram :: Output -> Format -> PrintMode -> Program a -> IO ()
-writeProgram outp Plc mode prog   = writePlc outp mode prog
-writeProgram outp (Cbor _) _ prog = writeCBOR outp prog
-writeProgram outp (Flat _) _ prog = writeFlat outp prog
-runPlcPrint :: PrintOptions -> IO ()
-runPlcPrint = runPrint parsePlcInput
 
 ---------------- Erasure ----------------
 

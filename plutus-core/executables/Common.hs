@@ -5,19 +5,21 @@
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE TypeApplications          #-}
 
-module Main (main) where
+module Common where
 
 import           PlutusPrelude                            (through)
 
 import qualified PlutusCore                               as PLC
 import qualified PlutusCore.CBOR                          as PLC
-import           PlutusCore.Check.Uniques                 (checkProgram)
+import           PlutusCore.Check.Uniques                 as PLC (checkProgram)
+import           PlutusCore.Error
 import qualified PlutusCore.Evaluation.Machine.Ck         as Ck
 import           PlutusCore.Evaluation.Machine.ExBudget   (ExBudget (..), ExRestrictingBudget (..))
 import           PlutusCore.Evaluation.Machine.ExMemory   (ExCPU (..), ExMemory (..))
 import qualified PlutusCore.Generators                    as Gen
 import qualified PlutusCore.Generators.Interesting        as Gen
 import qualified PlutusCore.Generators.Test               as Gen
+import qualified PlutusCore.Parser                        as PLC (parseProgram)
 import qualified PlutusCore.Pretty                        as PP
 import           PlutusCore.Rename                        (rename)
 import qualified PlutusCore.StdLib.Data.Bool              as StdLib
@@ -26,11 +28,15 @@ import qualified PlutusCore.StdLib.Data.Integer           as StdLib
 import qualified PlutusCore.StdLib.Data.Unit              as StdLib
 
 import qualified UntypedPlutusCore                        as UPLC
+import qualified UntypedPlutusCore.Check.Uniques          as UPLC (checkProgram)
+import qualified UntypedPlutusCore.Core.Instance.CBOR     as UPLC
 import qualified UntypedPlutusCore.Evaluation.Machine.Cek as Cek
+import qualified UntypedPlutusCore.Parser                 as UPLC (parseProgram)
 
 import           Codec.Serialise                          (DeserialiseFailure (DeserialiseFailure))
 import           Control.DeepSeq                          (NFData, rnf)
 import           Control.Monad                            (void)
+import           Control.Monad.Except
 import           Control.Monad.Trans.Except               (runExceptT)
 import           Data.Bifunctor                           (second)
 import qualified Data.ByteString.Lazy                     as BSL
@@ -64,25 +70,48 @@ import           Text.Read                                (readMaybe)
    CBOR with arbitrary annotation types: fixing the annotation type to be () is
    the simplest thing to do and fits our use case.
  -}
-{-
+
 -----------Executable type class-----------
 -- currently we only have PLC and UPLC. PIR will be added later on.
 
+-- | PLC program type.
 type PlcProg = PLC.Program PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun
 
+-- | UPLC program type.
 type UplcProg = UPLC.Program PLC.Name PLC.DefaultUni PLC.DefaultFun
 
 class Executable a where
-  parseProgram :: Input -> (a AlexPosn)
+  parseProgram ::
+    (AsParseError e PLC.AlexPosn, MonadError e m, PLC.MonadQuote m) =>
+    BSL.ByteString ->
+      m (a PLC.AlexPosn)
+
+  checkProgram ::
+     (AsUniqueError e ann,
+       MonadError e m)
+    => (UniqueError ann -> Bool)
+    -> a ann
+    -> m ()
+
+  deserialiseRestoringUnitsOrFail ::
+    BSL.ByteString
+      -> Either DeserialiseFailure (a ())
+
+  serialiseProgramCBOR :: a () -> BSL.ByteString
 
 -- | Instance for PLC program.
 instance Executable PlcProg where
-  parseProgram :: Input ->
-
+  parseProgram = PLC.parseProgram
+  checkProgram = PLC.checkProgram
+  deserialiseRestoringUnitsOrFail = PLC.deserialiseRestoringUnitsOrFail
+  serialiseProgramCBOR = PLC.serialiseOmittingUnits
 -- | Instance for UPLC program.
 instance Executable UplcProg where
-  parseProgram :: Input -> PLCThing
--}
+  parseProgram = UPLC.parseProgram
+  checkProgram = UPLC.parseProgram
+  deserialiseRestoringUnitsOrFail = UPLC.deserialiseRestoringUnitsOrFail
+  serialiseProgramCBOR = UPLC.serialiseOmittingUnits
+
 ---------------- Types for commands and arguments ----------------
 
 data Input       = FileInput FilePath | StdInput
@@ -401,19 +430,16 @@ getInput (FileInput file) = readFile file
 getInput StdInput         = getContents
 
 -- | Read and parse a source program
-parseInput :: PLC.Rename a =>
-  -- | The parseProgram function for either UPLC or PLC
-  (BSL.ByteString -> PLC.QuoteT (Either (PLC.ParseError PLC.AlexPosn)) a) ->
-  -- | The checkProgram function for either UPLC or PLC
-  ((PLC.UniqueError ann -> Bool) -> a -> Either (PLC.UniqueError PLC.AlexPosn) ()) ->
+parseInput ::
+  (Executable a) =>
   -- | The source program
   Input ->
   -- | The output is either a UPLC or PLC program
-  IO a
-parseInput parseProg checkProg inp = do
+  IO (a PLC.AlexPosn)
+parseInput inp = do
     bsContents <- BSL.fromStrict . encodeUtf8 . T.pack <$> getInput inp
     -- parse the UPLC program
-    case PLC.runQuoteT $ parseProg bsContents of
+    case PLC.runQuoteT $ parseProgram bsContents of
       -- when it's failed, pretty print parse errors.
       Left (err :: PLC.ParseError PLC.AlexPosn) ->
         errorWithoutStackTrace $ PP.render $ pretty err
@@ -422,7 +448,7 @@ parseInput parseProg checkProg inp = do
         -- run @rename@ through the program
         renamed <- PLC.runQuoteT $ rename p
         -- check the program for @UniqueError@'s
-        let checked = through (checkProg (const True)) renamed
+        let checked = through (Common.checkProgram (const True)) renamed
         case checked of
           -- pretty print the error
           Left (err :: PLC.UniqueError PLC.AlexPosn) ->
@@ -436,29 +462,33 @@ getBinaryInput StdInput         = BSL.getContents
 getBinaryInput (FileInput file) = BSL.readFile file
 
 -- Read and deserialise a CBOR-encoded AST
-loadASTfromCBOR :: Input -> IO (Program ())
+loadASTfromCBOR ::
+  (Executable a) =>
+  Input -> IO (a ())
 loadASTfromCBOR inp = do
     bin <- getBinaryInput inp
-    case PLC.deserialiseRestoringUnitsOrFail bin of
+    case deserialiseRestoringUnitsOrFail bin of
       Left (DeserialiseFailure offset msg) ->
         errorWithoutStackTrace $ "CBOR deserialisation failure at offset " ++ Prelude.show offset ++ ": " ++ msg
       Right r -> return r
 
 -- Read and deserialise a Flat-encoded AST
-loadASTfromFlat :: Input -> IO (Program ())
+loadASTfromFlat ::
+  (Executable a) =>
+    Input -> IO (a ())
 loadASTfromFlat inp = do
     bin <- getBinaryInput inp
-    --  >>= handleResult TypedProgram . unflat
     case unflat bin of
       Left e  -> errorWithoutStackTrace $ "Flat deserialisation failure: " ++ show e
       Right r -> return r
 
-
 -- Read either a PLC file or a CBOR file, depending on 'fmt'
-getProgram ::  Format -> Input  -> IO (Program PLC.AlexPosn)
+getProgram ::
+  (Executable a) =>
+  Format -> Input  -> IO (a PLC.AlexPosn)
 getProgram fmt inp =
     case fmt of
-      Plc  -> parsePlcInput inp
+      Plc  -> parseInput inp
       Cbor _ -> do
                prog <- loadASTfromCBOR inp
                return $ PLC.AlexPn 0 0 0 <$ prog  -- No source locations in CBOR, so we have to make them up.
@@ -469,10 +499,8 @@ getProgram fmt inp =
 
 ---------------- Serialise a program using CBOR ----------------
 
-serialiseProgramCBOR :: Program () -> BSL.ByteString
-serialiseProgramCBOR = PLC.serialiseOmittingUnits
-
-writeCBOR :: Output -> Program a -> IO ()
+writeCBOR ::
+  (Executable a) => Output -> a b -> IO ()
 writeCBOR outp prog = do
   let cbor = serialiseProgramCBOR (() <$ prog) -- Change annotations to (): see Note [Annotation types].
   case outp of
@@ -481,10 +509,12 @@ writeCBOR outp prog = do
 
 ---------------- Serialise a program using Flat ----------------
 
-serialiseProgramFlat :: Flat a => Program a -> BSL.ByteString
+serialiseProgramFlat ::
+  (Executable a, Flat b) => a b -> BSL.ByteString
 serialiseProgramFlat p = BSL.fromStrict $ flat p
 
-writeFlat :: Output -> Program a -> IO ()
+writeFlat ::
+  (Executable a) => Output -> a b -> IO ()
 writeFlat outp prog = do
   let flatProg = serialiseProgramFlat (() <$ prog) -- Change annotations to (): see Note [Annotation types].
   case outp of
@@ -514,17 +544,27 @@ runConvert (ConvertOptions inp ifmt outp ofmt mode) = do
     program <- getProgram ifmt inp
     writeProgram outp ofmt mode program
 
+writeProgram ::
+  (Executable a) => Output -> Format -> PrintMode -> a b -> IO ()
+writeProgram outp Plc mode prog          = writeToFileOrStd outp mode prog
+writeProgram outp (Cbor cborMode) _ prog = writeCBOR outp cborMode prog
+writeProgram outp (Flat flatMode) _ prog = writeFlat outp flatMode prog
+
+writeToFileOrStd ::
+  (Executable a) => Output -> PrintMode -> a b -> IO ()
+writeToFileOrStd outp mode prog = do
+  let printMethod = getPrintMethod mode
+  case outp of
+        FileOutput file -> writeFile file . Prelude.show . printMethod $ prog
+        StdOutput       -> print . printMethod $ prog
+
 
 ---------------- Parse and print a PLC source file ----------------
 
-runPrint ::
-  (Input
-  -> IO
-     (PLC.Program
-        PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun PLC.AlexPosn)) ->
-  PrintOptions -> IO ()
-runPrint parseFn (PrintOptions inp mode) =
-    parseFn inp >>= print . getPrintMethod mode
+runPrint :: PrintOptions -> IO ()
+runPrint (PrintOptions inp mode) =
+    parseInput inp >>= print . (getPrintMethod mode)
+
 
 ---------------- Script application ----------------
 
