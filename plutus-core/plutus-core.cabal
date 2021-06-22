@@ -409,6 +409,8 @@ executable plc
     import: lang
     main-is: plc/Main.hs
     hs-source-dirs: executables
+    other-modules:
+        Common
     build-depends:
         plutus-core -any,
         base <5,
@@ -428,6 +430,8 @@ executable uplc
     import: lang
     main-is: uplc/Main.hs
     hs-source-dirs: executables
+    other-modules:
+        Common
     build-depends:
         plutus-core -any,
         base <5,

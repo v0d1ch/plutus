@@ -57,7 +57,6 @@ import           Text.Read                                (readMaybe)
 -- serialisation/deserialisation.  We may wish to add TypedProgramDeBruijn as
 -- well if we modify the CEK machine to run directly on de Bruijnified ASTs, but
 -- support for this is lacking elsewhere at the moment.
-type UntypedProgramDeBruijn a = UPLC.Program UPLC.DeBruijn PLC.DefaultUni PLC.DefaultFun a
 
 uplcHelpText :: String
 uplcHelpText = helpText "Untyped Plutus Core"
@@ -76,13 +75,6 @@ fromDeBruijn prog = do
     case PLC.runQuote $ runExceptT @UPLC.FreeVariableError $ UPLC.unDeBruijnProgram namedProgram of
       Left e  -> errorWithoutStackTrace $ show e
       Right p -> return p
-
--- | Convert an untyped program to one where the 'name' type is de Bruijn indices.
-toDeBruijn :: UntypedProgram a -> IO (UntypedProgramDeBruijn a)
-toDeBruijn prog =
-  case runExcept @UPLC.FreeVariableError (UPLC.deBruijnProgram prog) of
-    Left e  -> errorWithoutStackTrace $ show e
-    Right p -> return $ UPLC.programMapNames (\(UPLC.NamedDeBruijn _ ix) -> UPLC.DeBruijn ix) p
 
 -- | Convert names to de Bruijn indices and then serialise
 serialiseDbProgramCBOR :: Program () -> IO BSL.ByteString
@@ -147,7 +139,7 @@ runApply (ApplyOptions inputfiles ifmt outp ofmt mode) = do
         case map (\case UntypedProgram p -> () <$ p; _ -> error "unexpected program type mismatch") scripts of
             []          -> errorWithoutStackTrace "No input files"
             progAndArgs -> UntypedProgram $ foldl1 UPLC.applyProgram progAndArgs
-writeProgram outp ofmt mode appliedScript
+  writeProgram outp ofmt mode appliedScript
 
 
 -- TODO: This supplies both typed and untyped examples.  Currently the untyped
@@ -202,88 +194,9 @@ runUplcPrint :: PrintOptions -> IO ()
 runUplcPrint = runPrint parseUplcInput
 
 
----------------- Printing budgets and costs ----------------
-
-printBudgetStateBudget :: UPLC.Term UPLC.Name PLC.DefaultUni PLC.DefaultFun () -> CekModel -> ExBudget -> IO ()
-printBudgetStateBudget _ model b =
-    case model of
-      Unit -> pure ()
-      _ ->  let ExCPU cpu = _exBudgetCPU b
-                ExMemory mem = _exBudgetMemory b
-            in do
-              putStrLn $ "CPU budget:    " ++ show cpu
-              putStrLn $ "Memory budget: " ++ show mem
-
-printBudgetStateTally :: (Eq fun, Cek.Hashable fun, Show fun)
-       => UPLC.Term UPLC.Name PLC.DefaultUni PLC.DefaultFun () -> CekModel ->  Cek.CekExTally fun -> IO ()
-printBudgetStateTally term model (Cek.CekExTally costs) = do
-  putStrLn $ "Const      " ++ pbudget (Cek.BStep Cek.BConst)
-  putStrLn $ "Var        " ++ pbudget (Cek.BStep Cek.BVar)
-  putStrLn $ "LamAbs     " ++ pbudget (Cek.BStep Cek.BLamAbs)
-  putStrLn $ "Apply      " ++ pbudget (Cek.BStep Cek.BApply)
-  putStrLn $ "Delay      " ++ pbudget (Cek.BStep Cek.BDelay)
-  putStrLn $ "Force      " ++ pbudget (Cek.BStep Cek.BForce)
-  putStrLn $ "Builtin    " ++ pbudget (Cek.BStep Cek.BBuiltin)
-  putStrLn ""
-  putStrLn $ "startup    " ++ pbudget Cek.BStartup
-  putStrLn $ "compute    " ++ printf "%-20s" (budgetToString totalComputeCost)
-  putStrLn $ "AST nodes  " ++ printf "%15d" (UPLC.termSize term)
-  putStrLn ""
-  putStrLn $ "BuiltinApp " ++ budgetToString builtinCosts
-  case model of
-    Default ->
-        do
-  -- 1e9*(0.200  + 0.0000725 * totalComputeSteps + builtinExeTimes/1000)  putStrLn ""
-          putStrLn ""
-          traverse_ (\(b,cost) -> putStrLn $ printf "%-20s %s" (show b) (budgetToString cost :: String)) builtinsAndCosts
-          putStrLn ""
-          putStrLn $ "Total budget spent: " ++ printf (budgetToString totalCost)
-          putStrLn $ "Predicted execution time: " ++ formatTimePicoseconds totalTime
-    Unit -> pure ()
-  where
-        getSpent k =
-            case H.lookup k costs of
-              Just v  -> v
-              Nothing -> ExBudget 0 0
-        allNodeTags = fmap Cek.BStep [Cek.BConst, Cek.BVar, Cek.BLamAbs, Cek.BApply, Cek.BDelay, Cek.BForce, Cek.BBuiltin]
-        totalComputeCost = mconcat $ map getSpent allNodeTags  -- For unitCekCosts this will be the total number of compute steps
-        budgetToString (ExBudget (ExCPU cpu) (ExMemory mem)) =
-            printf "%15s  %15s" (show cpu) (show mem) :: String -- Not %d: doesn't work when CostingInteger is SatInt.
-        pbudget = budgetToString . getSpent
-        f l e = case e of {(Cek.BBuiltinApp b, cost)  -> (b,cost):l; _ -> l}
-        builtinsAndCosts = List.foldl f [] (H.toList costs)
-        builtinCosts = mconcat (map snd builtinsAndCosts)
-        -- ^ Total builtin evaluation time (according to the models) in picoseconds (units depend on BuiltinCostModel.costMultiplier)
-        getCPU b = let ExCPU b' = _exBudgetCPU b in fromIntegral b'::Double
-        totalCost = getSpent Cek.BStartup <> totalComputeCost <> builtinCosts
-        totalTime = getCPU (getSpent Cek.BStartup) + getCPU totalComputeCost + getCPU builtinCosts
-
-class PrintBudgetState cost where
-    printBudgetState :: UPLC.Term PLC.Name PLC.DefaultUni PLC.DefaultFun () -> CekModel -> cost -> IO ()
-    -- TODO: Tidy this up.  We're passing in the term and the CEK cost model
-    -- here, but we only need them in tallying mode (where we need the term so
-    -- we can print out the AST size and we need the model type to decide how
-    -- much information we're going to print out).
-
-instance PrintBudgetState Cek.CountingSt where
-    printBudgetState term model (Cek.CountingSt budget) = printBudgetStateBudget term model budget
-
-instance (Eq fun, Cek.Hashable fun, Show fun) => PrintBudgetState (Cek.TallyingSt fun) where
-    printBudgetState term model (Cek.TallyingSt tally budget) = do
-        printBudgetStateBudget term model budget
-        putStrLn ""
-        printBudgetStateTally term model tally
-
-instance PrintBudgetState Cek.RestrictingSt where
-    printBudgetState term model (Cek.RestrictingSt (ExRestrictingBudget budget)) =
-        printBudgetStateBudget term model budget
-
-
-
-
 main :: IO ()
 main = do
-    options <- customExecParser (prefs showHelpOnEmpty) plcInfoCommand
+    options <- customExecParser (prefs showHelpOnEmpty) uplcInfoCommand
     case options of
         Apply     opts -> runApply        opts
         Typecheck opts -> runTypecheck    opts

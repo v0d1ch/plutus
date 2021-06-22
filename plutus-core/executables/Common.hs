@@ -1,9 +1,12 @@
 {-# LANGUAGE BangPatterns              #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleInstances         #-}
 {-# LANGUAGE LambdaCase                #-}
 {-# LANGUAGE MultiParamTypeClasses     #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE TypeApplications          #-}
+
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Common where
 
@@ -71,14 +74,16 @@ import           Text.Read                                (readMaybe)
    the simplest thing to do and fits our use case.
  -}
 
------------Executable type class-----------
+----------- Executable type class -----------
 -- currently we only have PLC and UPLC. PIR will be added later on.
 
 -- | PLC program type.
-type PlcProg = PLC.Program PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun
+type PlcProg =
+  PLC.Program PLC.TyName PLC.Name PLC.DefaultUni PLC.DefaultFun
 
 -- | UPLC program type.
-type UplcProg = UPLC.Program PLC.Name PLC.DefaultUni PLC.DefaultFun
+type UplcProg =
+  UPLC.Program PLC.Name PLC.DefaultUni PLC.DefaultFun
 
 class Executable a where
   parseProgram ::
@@ -87,7 +92,7 @@ class Executable a where
       m (a PLC.AlexPosn)
 
   checkProgram ::
-     (AsUniqueError e ann,
+     (Ord ann, AsUniqueError e ann,
        MonadError e m)
     => (UniqueError ann -> Bool)
     -> a ann
@@ -99,18 +104,124 @@ class Executable a where
 
   serialiseProgramCBOR :: a () -> BSL.ByteString
 
+  -- | Convert names to de Bruijn indices and then serialise
+  serialiseDbProgramCBOR :: a () -> IO BSL.ByteString
+
+  -- | Convert names to de Bruijn indices and then serialise
+  serialiseDbProgramFlat :: Flat b => a b -> IO BSL.ByteString
+
 -- | Instance for PLC program.
 instance Executable PlcProg where
   parseProgram = PLC.parseProgram
   checkProgram = PLC.checkProgram
   deserialiseRestoringUnitsOrFail = PLC.deserialiseRestoringUnitsOrFail
   serialiseProgramCBOR = PLC.serialiseOmittingUnits
+  serialiseDbProgramCBOR = typedDeBruijnNotSupportedError
+  serialiseDbProgramFlat = typedDeBruijnNotSupportedError
+
 -- | Instance for UPLC program.
 instance Executable UplcProg where
   parseProgram = UPLC.parseProgram
-  checkProgram = UPLC.parseProgram
+  checkProgram = UPLC.checkProgram
   deserialiseRestoringUnitsOrFail = UPLC.deserialiseRestoringUnitsOrFail
   serialiseProgramCBOR = UPLC.serialiseOmittingUnits
+  serialiseDbProgramCBOR p = UPLC.serialiseOmittingUnits <$> toDeBruijn p
+  serialiseDbProgramFlat p = BSL.fromStrict . flat <$> toDeBruijn p
+
+-- We don't support de Bruijn names for typed programs because we really only
+-- want serialisation for on-chain programs (and some of the functionality we'd
+-- need isn't available anyway).
+typedDeBruijnNotSupportedError ::
+  PlcProg b -> IO BSL.ByteString
+typedDeBruijnNotSupportedError _ =
+    errorWithoutStackTrace "De-Bruijn-named ASTs are not supported for typed Plutus Core"
+
+
+-- | Convert an untyped program to one where the 'name' type is de Bruijn indices.
+toDeBruijn :: UplcProg b -> IO (UPLC.Program UPLC.DeBruijn PLC.DefaultUni PLC.DefaultFun b)
+toDeBruijn prog =
+  case runExcept @UPLC.FreeVariableError (UPLC.deBruijnProgram prog) of
+    Left e  -> errorWithoutStackTrace $ show e
+    Right p -> return $ UPLC.programMapNames (\(UPLC.NamedDeBruijn _ ix) -> UPLC.DeBruijn ix) p
+
+
+---------------- Printing budgets and costs ----------------
+
+printBudgetStateBudget :: UPLC.Term UPLC.Name PLC.DefaultUni PLC.DefaultFun () -> CekModel -> ExBudget -> IO ()
+printBudgetStateBudget _ model b =
+    case model of
+      Unit -> pure ()
+      _ ->  let ExCPU cpu = _exBudgetCPU b
+                ExMemory mem = _exBudgetMemory b
+            in do
+              putStrLn $ "CPU budget:    " ++ show cpu
+              putStrLn $ "Memory budget: " ++ show mem
+
+printBudgetStateTally :: (Eq fun, Cek.Hashable fun, Show fun)
+       => UPLC.Term UPLC.Name PLC.DefaultUni PLC.DefaultFun () -> CekModel ->  Cek.CekExTally fun -> IO ()
+printBudgetStateTally term model (Cek.CekExTally costs) = do
+  putStrLn $ "Const      " ++ pbudget (Cek.BStep Cek.BConst)
+  putStrLn $ "Var        " ++ pbudget (Cek.BStep Cek.BVar)
+  putStrLn $ "LamAbs     " ++ pbudget (Cek.BStep Cek.BLamAbs)
+  putStrLn $ "Apply      " ++ pbudget (Cek.BStep Cek.BApply)
+  putStrLn $ "Delay      " ++ pbudget (Cek.BStep Cek.BDelay)
+  putStrLn $ "Force      " ++ pbudget (Cek.BStep Cek.BForce)
+  putStrLn $ "Builtin    " ++ pbudget (Cek.BStep Cek.BBuiltin)
+  putStrLn ""
+  putStrLn $ "startup    " ++ pbudget Cek.BStartup
+  putStrLn $ "compute    " ++ printf "%-20s" (budgetToString totalComputeCost)
+  putStrLn $ "AST nodes  " ++ printf "%15d" (UPLC.termSize term)
+  putStrLn ""
+  putStrLn $ "BuiltinApp " ++ budgetToString builtinCosts
+  case model of
+    Default ->
+        do
+  -- 1e9*(0.200  + 0.0000725 * totalComputeSteps + builtinExeTimes/1000)  putStrLn ""
+          putStrLn ""
+          traverse_ (\(b,cost) -> putStrLn $ printf "%-20s %s" (show b) (budgetToString cost :: String)) builtinsAndCosts
+          putStrLn ""
+          putStrLn $ "Total budget spent: " ++ printf (budgetToString totalCost)
+          putStrLn $ "Predicted execution time: " ++ (formatTimePicoseconds totalTime)
+    Unit -> pure ()
+  where
+        getSpent k =
+            case H.lookup k costs of
+              Just v  -> v
+              Nothing -> ExBudget 0 0
+        allNodeTags = fmap Cek.BStep [Cek.BConst, Cek.BVar, Cek.BLamAbs, Cek.BApply, Cek.BDelay, Cek.BForce, Cek.BBuiltin]
+        totalComputeCost = mconcat $ map getSpent allNodeTags  -- For unitCekCosts this will be the total number of compute steps
+        budgetToString (ExBudget (ExCPU cpu) (ExMemory mem)) =
+            printf "%15s  %15s" (show cpu) (show mem) :: String -- Not %d: doesn't work when CostingInteger is SatInt.
+        pbudget = budgetToString . getSpent
+        f l e = case e of {(Cek.BBuiltinApp b, cost)  -> (b,cost):l; _ -> l}
+        builtinsAndCosts = List.foldl f [] (H.toList costs)
+        builtinCosts = mconcat (map snd builtinsAndCosts)
+        -- ^ Total builtin evaluation time (according to the models) in picoseconds (units depend on BuiltinCostModel.costMultiplier)
+        getCPU b = let ExCPU b' = _exBudgetCPU b in fromIntegral b'::Double
+        totalCost = getSpent Cek.BStartup <> totalComputeCost <> builtinCosts
+        totalTime = (getCPU $ getSpent Cek.BStartup) + getCPU totalComputeCost + getCPU builtinCosts
+
+
+class PrintBudgetState cost where
+    printBudgetState :: UPLC.Term PLC.Name PLC.DefaultUni PLC.DefaultFun () -> CekModel -> cost -> IO ()
+    -- TODO: Tidy this up.  We're passing in the term and the CEK cost model
+    -- here, but we only need them in tallying mode (where we need the term so
+    -- we can print out the AST size and we need the model type to decide how
+    -- much information we're going to print out).
+
+instance PrintBudgetState Cek.CountingSt where
+    printBudgetState term model (Cek.CountingSt budget) = printBudgetStateBudget term model budget
+
+instance (Eq fun, Cek.Hashable fun, Show fun) => PrintBudgetState (Cek.TallyingSt fun) where
+    printBudgetState term model (Cek.TallyingSt tally budget) = do
+        printBudgetStateBudget term model budget
+        putStrLn ""
+        printBudgetStateTally term model tally
+
+instance PrintBudgetState Cek.RestrictingSt where
+    printBudgetState term model (Cek.RestrictingSt (ExRestrictingBudget budget)) =
+        printBudgetStateBudget term model budget
+
 
 ---------------- Types for commands and arguments ----------------
 
@@ -431,7 +542,7 @@ getInput StdInput         = getContents
 
 -- | Read and parse a source program
 parseInput ::
-  (Executable a) =>
+  (Executable a, PLC.Rename (a PLC.AlexPosn) ) =>
   -- | The source program
   Input ->
   -- | The output is either a UPLC or PLC program
@@ -474,7 +585,7 @@ loadASTfromCBOR inp = do
 
 -- Read and deserialise a Flat-encoded AST
 loadASTfromFlat ::
-  (Executable a) =>
+  (Executable a, Flat (a ())) =>
     Input -> IO (a ())
 loadASTfromFlat inp = do
     bin <- getBinaryInput inp
@@ -484,7 +595,7 @@ loadASTfromFlat inp = do
 
 -- Read either a PLC file or a CBOR file, depending on 'fmt'
 getProgram ::
-  (Executable a) =>
+  (Executable a, Functor a, PLC.Rename (a PLC.AlexPosn), Flat (a ())) =>
   Format -> Input  -> IO (a PLC.AlexPosn)
 getProgram fmt inp =
     case fmt of
@@ -500,9 +611,11 @@ getProgram fmt inp =
 ---------------- Serialise a program using CBOR ----------------
 
 writeCBOR ::
-  (Executable a) => Output -> a b -> IO ()
-writeCBOR outp prog = do
-  let cbor = serialiseProgramCBOR (() <$ prog) -- Change annotations to (): see Note [Annotation types].
+  (Executable a, Functor a) => Output -> AstNameType -> a b -> IO ()
+writeCBOR outp cborMode prog = do
+  cbor <- case cborMode of
+            Named    -> pure $ serialiseProgramCBOR (() <$ prog) -- Change annotations to (): see Note [Annotation types].
+            DeBruijn -> serialiseDbProgramCBOR (() <$ prog)
   case outp of
     FileOutput file -> BSL.writeFile file cbor
     StdOutput       -> BSL.putStr cbor
@@ -510,13 +623,15 @@ writeCBOR outp prog = do
 ---------------- Serialise a program using Flat ----------------
 
 serialiseProgramFlat ::
-  (Executable a, Flat b) => a b -> BSL.ByteString
+  (Executable a, Flat b, Flat (a b)) => a b -> BSL.ByteString
 serialiseProgramFlat p = BSL.fromStrict $ flat p
 
 writeFlat ::
-  (Executable a) => Output -> a b -> IO ()
-writeFlat outp prog = do
-  let flatProg = serialiseProgramFlat (() <$ prog) -- Change annotations to (): see Note [Annotation types].
+  (Executable a, Functor a, Flat (a ())) => Output -> AstNameType -> a b -> IO ()
+writeFlat outp flatMode prog = do
+  flatProg <- case flatMode of
+            Named    -> pure $ serialiseProgramFlat (() <$ prog) -- Change annotations to (): see Note [Annotation types].
+            DeBruijn -> serialiseDbProgramFlat (() <$ prog)
   case outp of
     FileOutput file -> BSL.writeFile file flatProg
     StdOutput       -> BSL.putStr flatProg
@@ -541,11 +656,11 @@ getPrintMethod = \case
 -- the separate `print` option may be more user-friendly though.
 runConvert :: ConvertOptions -> IO ()
 runConvert (ConvertOptions inp ifmt outp ofmt mode) = do
-    program <- getProgram ifmt inp
+    program <- (getProgram ifmt inp :: IO (PlcProg PLC.AlexPosn))
     writeProgram outp ofmt mode program
 
 writeProgram ::
-  (Executable a) => Output -> Format -> PrintMode -> a b -> IO ()
+  (Executable a, Functor a, Flat (a ())) => Output -> Format -> PrintMode -> a b -> IO ()
 writeProgram outp Plc mode prog          = writeToFileOrStd outp mode prog
 writeProgram outp (Cbor cborMode) _ prog = writeCBOR outp cborMode prog
 writeProgram outp (Flat flatMode) _ prog = writeFlat outp flatMode prog
@@ -563,7 +678,7 @@ writeToFileOrStd outp mode prog = do
 
 runPrint :: PrintOptions -> IO ()
 runPrint (PrintOptions inp mode) =
-    parseInput inp >>= print . (getPrintMethod mode)
+    parseInput inp >>= print . getPrintMethod mode
 
 
 ---------------- Script application ----------------
@@ -723,16 +838,3 @@ runEval (EvalOptions inp ifmt evalMode printMode budgetMode timingMode _) =
                 [Right _]  -> exitSuccess -- We don't want to see the result here
                 [Left err] -> print err >> exitFailure
                 _          -> error "Timing evaluations returned inconsistent results" -- Should never happen
-
-
-main :: IO ()
-main = do
-    options <- customExecParser (prefs showHelpOnEmpty) plcInfoCommand
-    case options of
-        Apply     opts -> runApply        opts
-        Typecheck opts -> runTypecheck    opts
-        Eval      opts -> runEval         opts
-        Example   opts -> runPrintExample opts
-        Erase     opts -> runErase        opts
-        Print     opts -> runPlcPrint        opts
-        Convert   opts -> runConvert      opts
