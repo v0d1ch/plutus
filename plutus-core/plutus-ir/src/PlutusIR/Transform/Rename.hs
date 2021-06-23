@@ -13,6 +13,7 @@ module PlutusIR.Transform.Rename () where
 import           PlutusPrelude
 
 import           PlutusIR
+import           PlutusIR.Mark
 
 import qualified PlutusCore                 as PLC
 import qualified PlutusCore.Name            as PLC
@@ -59,9 +60,8 @@ Two problems arise:
 -}
 
 instance PLC.HasUniques (Term tyname name uni fun ann) => PLC.Rename (Term tyname name uni fun ann) where
-    -- TODO: the Plutus Core codebase uses marking in order to prevent clashing with existing
-    -- free variables. Should we do the same here?
-    rename = PLC.runRenameT . renameTermM
+    -- See Note [Marking]
+    rename = through markNonFreshTerm >=> PLC.runRenameT . renameTermM
 
 -- (let
 --   (nonrec)

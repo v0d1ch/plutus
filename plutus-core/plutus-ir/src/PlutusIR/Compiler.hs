@@ -30,6 +30,7 @@ import           PlutusIR.Compiler.Lower
 import           PlutusIR.Compiler.Provenance
 import           PlutusIR.Compiler.Types
 import           PlutusIR.Error
+import           PlutusIR.Mark
 import qualified PlutusIR.Transform.Beta            as Beta
 import qualified PlutusIR.Transform.DeadCode        as DeadCode
 import qualified PlutusIR.Transform.Inline          as Inline
@@ -102,7 +103,10 @@ compileToReadable =
 -- Note: the result *does* have globally unique names.
 compileReadableToPlc :: Compiling m e uni fun a => Term TyName Name uni fun (Provenance a) -> m (PLCTerm uni fun a)
 compileReadableToPlc =
-    NonStrict.compileNonStrictBindings
+    -- See Note [Marking]. Failing to call 'markNonFreshTerm' results in variable capture
+    -- even in simple cases causing tests to fail.
+    through markNonFreshTerm
+    >=> NonStrict.compileNonStrictBindings
     >=> Let.compileLets Let.DataTypes
     >=> Let.compileLets Let.RecTerms
     -- We introduce some non-recursive let bindings while eliminating recursive let-bindings, so we
