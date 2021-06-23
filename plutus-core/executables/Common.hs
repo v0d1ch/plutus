@@ -6,8 +6,6 @@
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE TypeApplications          #-}
 
-{-# OPTIONS_GHC -Wno-orphans #-}
-
 module Common where
 
 import           PlutusPrelude                            (through)
@@ -15,14 +13,13 @@ import           PlutusPrelude                            (through)
 import qualified PlutusCore                               as PLC
 import qualified PlutusCore.CBOR                          as PLC
 import           PlutusCore.Check.Uniques                 as PLC (checkProgram)
-import           PlutusCore.Error
+import           PlutusCore.Error                         (AsParseError, AsUniqueError, UniqueError)
 import qualified PlutusCore.Evaluation.Machine.Ck         as Ck
 import           PlutusCore.Evaluation.Machine.ExBudget   (ExBudget (..), ExRestrictingBudget (..))
 import           PlutusCore.Evaluation.Machine.ExMemory   (ExCPU (..), ExMemory (..))
 import qualified PlutusCore.Generators                    as Gen
 import qualified PlutusCore.Generators.Interesting        as Gen
 import qualified PlutusCore.Generators.Test               as Gen
-import qualified PlutusCore.Parser                        as PLC (parseProgram)
 import qualified PlutusCore.Pretty                        as PP
 import           PlutusCore.Rename                        (rename)
 import qualified PlutusCore.StdLib.Data.Bool              as StdLib
@@ -181,7 +178,7 @@ printBudgetStateTally term model (Cek.CekExTally costs) = do
           traverse_ (\(b,cost) -> putStrLn $ printf "%-20s %s" (show b) (budgetToString cost :: String)) builtinsAndCosts
           putStrLn ""
           putStrLn $ "Total budget spent: " ++ printf (budgetToString totalCost)
-          putStrLn $ "Predicted execution time: " ++ (formatTimePicoseconds totalTime)
+          putStrLn $ "Predicted execution time: " ++ formatTimePicoseconds totalTime
     Unit -> pure ()
   where
         getSpent k =
@@ -608,6 +605,7 @@ getProgram fmt inp =
                return $ PLC.AlexPn 0 0 0 <$ prog  -- No source locations in CBOR, so we have to make them up.
 
 
+
 ---------------- Serialise a program using CBOR ----------------
 
 writeCBOR ::
@@ -639,7 +637,8 @@ writeFlat outp flatMode prog = do
 
 ---------------- Write an AST as PLC source ----------------
 
-getPrintMethod :: PP.PrettyPlc a => PrintMode -> (a -> Doc ann)
+getPrintMethod ::
+  PP.PrettyPlc a => PrintMode -> (a -> Doc ann)
 getPrintMethod = \case
       Classic       -> PP.prettyPlcClassicDef
       Debug         -> PP.prettyPlcClassicDebug
@@ -660,38 +659,23 @@ runConvert (ConvertOptions inp ifmt outp ofmt mode) = do
     writeProgram outp ofmt mode program
 
 writeProgram ::
-  (Executable a, Functor a, Flat (a ())) => Output -> Format -> PrintMode -> a b -> IO ()
+  (Executable a,
+   Functor a,
+   Flat (a ()),
+   PP.PrettyBy PP.PrettyConfigPlc (a b)) =>
+   Output -> Format -> PrintMode -> a b -> IO ()
 writeProgram outp Plc mode prog          = writeToFileOrStd outp mode prog
 writeProgram outp (Cbor cborMode) _ prog = writeCBOR outp cborMode prog
 writeProgram outp (Flat flatMode) _ prog = writeFlat outp flatMode prog
 
 writeToFileOrStd ::
-  (Executable a) => Output -> PrintMode -> a b -> IO ()
+  (PP.PrettyBy PP.PrettyConfigPlc (a b)) => Output -> PrintMode -> a b -> IO ()
 writeToFileOrStd outp mode prog = do
   let printMethod = getPrintMethod mode
   case outp of
         FileOutput file -> writeFile file . Prelude.show . printMethod $ prog
         StdOutput       -> print . printMethod $ prog
 
-
----------------- Parse and print a PLC source file ----------------
-
-runPrint :: PrintOptions -> IO ()
-runPrint (PrintOptions inp mode) =
-    parseInput inp >>= print . getPrintMethod mode
-
-
----------------- Script application ----------------
-
--- | Apply one script to a list of others.
-runApply :: ApplyOptions -> IO ()
-runApply (ApplyOptions inputfiles ifmt outp ofmt mode) = do
-  scripts <- mapM (getProgram ifmt . FileInput) inputfiles
-  let appliedScript =
-        case map (\case p -> () <$ p) scripts of
-          []          -> errorWithoutStackTrace "No input files"
-          progAndargs -> foldl1 PLC.applyProgram progAndargs
-  writeProgram outp ofmt mode appliedScript
 
 ---------------- Examples ----------------
 
@@ -809,6 +793,20 @@ timeEval n evaluate prog
             end <- getCPUTime
             pure (result, end - start)
 
+---------------- Typechecking ----------------
+
+runTypecheck :: TypecheckOptions -> IO ()
+runTypecheck (TypecheckOptions inp fmt) = do
+  prog <- getProgram fmt inp
+  case PLC.runQuoteT $ do
+    tcConfig <- PLC.getDefTypeCheckConfig ()
+    PLC.typecheckPipeline tcConfig (void prog)
+    of
+      Left (e :: PLC.Error PLC.DefaultUni PLC.DefaultFun ()) ->
+        errorWithoutStackTrace $ PP.displayPlcDef e
+      Right ty                                               ->
+        T.putStrLn (PP.displayPlcDef ty) >> exitSuccess
+
 
 ---------------- Evaluation ----------------
 
@@ -838,3 +836,15 @@ runEval (EvalOptions inp ifmt evalMode printMode budgetMode timingMode _) =
                 [Right _]  -> exitSuccess -- We don't want to see the result here
                 [Left err] -> print err >> exitFailure
                 _          -> error "Timing evaluations returned inconsistent results" -- Should never happen
+
+---------------- Erasure ----------------
+
+-- | Input a program, erase the types, then output it
+runErase :: EraseOptions -> IO ()
+runErase (EraseOptions inp ifmt outp ofmt mode) = do
+  typedProg <- getProgram ifmt inp
+  let untypedProg = () <$ UPLC.eraseProgram typedProg
+  case ofmt of
+    Plc           -> writeToFileOrStd outp mode untypedProg
+    Cbor cborMode -> writeCBOR outp cborMode untypedProg
+    Flat flatMode -> writeFlat outp flatMode untypedProg
