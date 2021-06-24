@@ -19,7 +19,8 @@ import Data.Map (Map)
 import Data.Maybe (Maybe)
 import Data.Set (Set)
 import Data.Symbol (SProxy(..))
-import Marlowe.Execution.Types (ExecutionState, NamedAction)
+import Marlowe.Execution.Types (NamedAction)
+import Marlowe.Execution.Types (State) as Execution
 import Marlowe.Extended.Metadata (MetaData)
 import Marlowe.PAB (PlutusAppId, MarloweParams)
 import Marlowe.Semantics (Party, TransactionInput)
@@ -28,7 +29,7 @@ import WalletData.Types (WalletNickname)
 _tab :: forall a. Lens' { tab :: Tab | a } Tab
 _tab = prop (SProxy :: SProxy "tab")
 
-_executionState :: Lens' State ExecutionState
+_executionState :: Lens' State Execution.State
 _executionState = prop (SProxy :: SProxy "executionState")
 
 _pendingTransaction :: Lens' State (Maybe TransactionInput)
